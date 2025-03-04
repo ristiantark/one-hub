@@ -52,8 +52,8 @@ func (p ReplicateProvider) CreateChatCompletion(request types.ChatCompletionRequ
 func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest[ReplicateChatRequest] {
 	systemPrompt := ""
 	prompt := ""
-	var imageUrl string // 仍然保留，但我们会优先使用最后一条含图片的消息
-
+	var imageUrl string
+	
 	// 设置最小 MaxTokens 为 1024
 	if request.MaxTokens == 0 && request.MaxCompletionTokens > 0 {
 		request.MaxTokens = request.MaxCompletionTokens
@@ -62,7 +62,7 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest
 	if request.MaxTokens < 1024 {
 		request.MaxTokens = 1024
 	}
-
+	
 	for _, msg := range request.Messages {
 		if msg.Role == "system" {
 			systemPrompt += msg.StringContent() + "\n"
@@ -76,15 +76,15 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest
 			if content.Type == types.ContentTypeText {
 				prompt += content.Text
 			} else if content.Type == types.ContentTypeImageURL {
-				// 处理图片URL - 保存最后一个图片URL
-				// 这样即使多轮对话中有多张图片，我们也会使用最新的一张
+				// 处理图片URL - 取最后一个图片URL作为图片输入
+				// Replicate API 通常只支持一张图片
 				imageUrl = content.ImageURL.URL
 			}
 		}
 		prompt += "\n"
 	}
 	prompt += "assistant: \n"
-
+	
 	return &ReplicateRequest[ReplicateChatRequest]{
 		Stream: request.Stream,
 		Input: ReplicateChatRequest{
@@ -184,7 +184,6 @@ func (h ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan 
 		h.Usage.PromptTokens = replicateResponse.Metrics.InputTokenCount
 		h.Usage.CompletionTokens = replicateResponse.Metrics.OutputTokenCount
 		h.Usage.TotalTokens = h.Usage.PromptTokens + h.Usage.CompletionTokens
-		
 		// 需要有一个stop
 		choice := types.ChatCompletionStreamChoice{
 			Index: 0,
@@ -195,41 +194,51 @@ func (h ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan 
 		}
 		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
 		errChan <- io.EOF
-		rawLine = requester.StreamClosed
+		*rawLine = requester.StreamClosed
 		return
 	}
 	
 	// 如果rawLine 前缀不为data:，则直接返回
 	if !strings.HasPrefix(string(rawLine), "data: ") {
-		rawLine = nil
+		// 对于空的data:行，它们代表换行符
+		if string(rawLine) == "data:" {
+			choice := types.ChatCompletionStreamChoice{
+				Index: 0,
+				Delta: types.ChatCompletionStreamChoiceDelta{
+					Role:    types.ChatMessageRoleAssistant,
+					Content: "\n",
+				},
+			}
+			dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
+		}
+		*rawLine = nil
 		return
 	}
 	
 	// 去除前缀
-	content := string(rawLine)[6:]
+	data := rawLine[6:]
 	
-	// 检查是否为空行
-	if content == "" {
-		// 如果是空行，则发送换行符
+	// 检查是否为空内容，如果是空内容但不是空字符串，也视为换行符
+	if len(data) == 0 {
 		choice := types.ChatCompletionStreamChoice{
 			Index: 0,
 			Delta: types.ChatCompletionStreamChoiceDelta{
 				Role:    types.ChatMessageRoleAssistant,
-				Content: "\n\n", // 发送两个换行符，模拟原始返回的格式
+				Content: "\n",
 			},
 		}
 		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-	} else {
-		// 非空内容正常处理
-		choice := types.ChatCompletionStreamChoice{
-			Index: 0,
-			Delta: types.ChatCompletionStreamChoiceDelta{
-				Role:    types.ChatMessageRoleAssistant,
-				Content: content,
-			},
-		}
-		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
+		return
 	}
+	
+	choice := types.ChatCompletionStreamChoice{
+		Index: 0,
+		Delta: types.ChatCompletionStreamChoiceDelta{
+			Role:    types.ChatMessageRoleAssistant,
+			Content: string(data),
+		},
+	}
+	dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
 }
 
 func getStreamResponse(id string, choice types.ChatCompletionStreamChoice, modelName string) string {
