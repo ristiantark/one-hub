@@ -19,7 +19,7 @@ type ReplicateStreamHandler struct {
 	Provider  *ReplicateProvider
 }
 
-func (p ReplicateProvider) CreateChatCompletion(request types.ChatCompletionRequest) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
+func (p *ReplicateProvider) CreateChatCompletion(request types.ChatCompletionRequest) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
 	url, errWithCode := p.GetSupportedAPIUri(config.RelayModeChatCompletions)
 	if errWithCode != nil {
 		return nil, errWithCode
@@ -115,7 +115,7 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) *ReplicateReques
 	}
 }
 
-func (p ReplicateProvider) convertToChatOpenai(response *ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
+func (p *ReplicateProvider) convertToChatOpenai(response *ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
 	responseText := ""
 	if response.Output != nil {
 		for _, text := range response.Output {
@@ -149,7 +149,7 @@ func (p ReplicateProvider) convertToChatOpenai(response *ReplicateResponse[[]str
 	return openaiResponse, nil
 }
 
-func (p ReplicateProvider) CreateChatCompletionStream(request types.ChatCompletionRequest) (requester.StreamReaderInterface[string], *types.OpenAIErrorWithStatusCode) {
+func (p *ReplicateProvider) CreateChatCompletionStream(request types.ChatCompletionRequest) (requester.StreamReaderInterface[string], *types.OpenAIErrorWithStatusCode) {
 	url, errWithCode := p.GetSupportedAPIUri(config.RelayModeChatCompletions)
 	if errWithCode != nil {
 		return nil, errWithCode
@@ -186,12 +186,16 @@ func (p ReplicateProvider) CreateChatCompletionStream(request types.ChatCompleti
 		Usage:     p.Usage,
 		ModelName: request.Model,
 		ID:        replicateResponse.ID,
-		Provider:  &p,
+		Provider:  p,
 	}
-	return requester.RequestStream(p.Requester, resp, chatHandler.HandlerChatStream)
+	
+	// 显式指定返回类型
+	return requester.RequestStream[string](p.Requester, resp, func(rawLine []byte, dataChan chan string, errChan chan error) {
+		chatHandler.HandlerChatStream(rawLine, dataChan, errChan)
+	})
 }
 
-func (h ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan string, errChan chan error) {
+func (h *ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan string, errChan chan error) {
 	if strings.HasPrefix(string(rawLine), "event: done") {
 		// 获取用量
 		replicateResponse := getPredictionResponse[[]string](h.Provider, h.ID)
