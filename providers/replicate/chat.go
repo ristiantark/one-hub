@@ -71,6 +71,7 @@ func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateReque
 		request.MaxTokens = 1024
 	}
 
+	// 遍历所有消息，确保捕获所有图片
 	for _, msg := range request.Messages {
 		if msg.Role == "system" {
 			systemPrompt += msg.StringContent() + "\n"
@@ -83,7 +84,8 @@ func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateReque
 			if content.Type == types.ContentTypeText {
 				prompt += content.Text
 			} else if content.Type == types.ContentTypeImageURL {
-				// 处理图片URL
+				// 处理图片URL - 只使用最后一个图片URL
+				// 注意：如果多个图片需要支持，请调整这里的实现
 				imageUrl = content.ImageURL.URL
 			}
 		}
@@ -91,8 +93,6 @@ func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateReque
 	}
 
 	prompt += "assistant: \n"
-
-	// 移除 defaultMaxImageResolution 声明
 
 	return &ReplicateRequest[ReplicateChatRequest]{
 		Stream: request.Stream,
@@ -111,7 +111,6 @@ func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateReque
 }
 
 func (p *ReplicateProvider) convertToChatOpenai(response *ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
-
 	responseText := ""
 	if response.Output != nil {
 		for _, text := range response.Output {
@@ -203,8 +202,10 @@ func (p *ReplicateProvider) CreateChatCompletionStream(request *types.ChatComple
 }
 
 func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan chan string, errChan chan error) {
-	if strings.HasPrefix(string(*rawLine), "event: done") {
+	line := string(*rawLine)
 
+	// 处理结束事件
+	if strings.HasPrefix(line, "event: done") {
 		// 获取用量
 		replicateResponse := getPredictionResponse[[]string](h.Provider, h.ID)
 
@@ -229,20 +230,25 @@ func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan cha
 		return
 	}
 
-	// 如果rawLine 前缀不为data:，则直接返回
-	if !strings.HasPrefix(string(*rawLine), "data: ") {
+	// 如果不是输出行，忽略
+	if !strings.HasPrefix(line, "data: ") {
 		*rawLine = nil
 		return
 	}
 
-	// 去除前缀
-	*rawLine = (*rawLine)[6:]
+	// 去除前缀 data:
+	content := line[6:]
+	
+	// 检查是否为空行（表示换行）
+	if strings.TrimSpace(content) == "" {
+		content = "\n"
+	}
 
 	choice := types.ChatCompletionStreamChoice{
 		Index: 0,
 		Delta: types.ChatCompletionStreamChoiceDelta{
 			Role:    types.ChatMessageRoleAssistant,
-			Content: string(*rawLine),
+			Content: content,
 		},
 	}
 
