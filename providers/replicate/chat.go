@@ -19,41 +19,49 @@ type ReplicateStreamHandler struct {
 	Provider  *ReplicateProvider
 }
 
-func (p ReplicateProvider) CreateChatCompletion(request types.ChatCompletionRequest) (response types.ChatCompletionResponse, errWithCode types.OpenAIErrorWithStatusCode) {
+func (p *ReplicateProvider) CreateChatCompletion(request *types.ChatCompletionRequest) (response *types.ChatCompletionResponse, errWithCode *types.OpenAIErrorWithStatusCode) {
 	url, errWithCode := p.GetSupportedAPIUri(config.RelayModeChatCompletions)
 	if errWithCode != nil {
 		return nil, errWithCode
 	}
+
 	// 获取请求地址
 	fullRequestURL := p.GetFullRequestURL(url, request.Model)
 	if fullRequestURL == "" {
 		return nil, common.ErrorWrapper(nil, "invalid_recraft_config", http.StatusInternalServerError)
 	}
+
 	// 获取请求头
 	headers := p.GetRequestHeaders()
+
 	replicateRequest := convertFromChatOpenai(request)
 	req, err := p.Requester.NewRequest(http.MethodPost, fullRequestURL, p.Requester.WithBody(replicateRequest), p.Requester.WithHeader(headers))
+
 	if err != nil {
 		return nil, common.ErrorWrapper(err, "new_request_failed", http.StatusInternalServerError)
 	}
+
 	replicateResponse := &ReplicateResponse[[]string]{}
+
 	// 发送请求
 	_, errWithCode = p.Requester.SendRequest(req, replicateResponse, false)
 	if errWithCode != nil {
 		return nil, errWithCode
 	}
+
 	replicateResponse, err = getPrediction(p, replicateResponse)
 	if err != nil {
 		return nil, common.ErrorWrapper(err, "prediction_failed", http.StatusInternalServerError)
 	}
+
 	return p.convertToChatOpenai(replicateResponse)
 }
 
-func convertFromChatOpenai(request types.ChatCompletionRequest) *ReplicateRequest[ReplicateChatRequest] {
+func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateRequest[ReplicateChatRequest] {
 	systemPrompt := ""
 	prompt := ""
 	var imageUrl string
-	
+
 	// 设置最小 MaxTokens 为 1024
 	if request.MaxTokens == 0 && request.MaxCompletionTokens > 0 {
 		request.MaxTokens = request.MaxCompletionTokens
@@ -62,28 +70,30 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) *ReplicateReques
 	if request.MaxTokens < 1024 {
 		request.MaxTokens = 1024
 	}
-	
+
 	for _, msg := range request.Messages {
 		if msg.Role == "system" {
 			systemPrompt += msg.StringContent() + "\n"
 			continue
 		}
-		
+
 		prompt += msg.Role + ": \n"
 		openaiContent := msg.ParseContent()
-		
 		for _, content := range openaiContent {
 			if content.Type == types.ContentTypeText {
 				prompt += content.Text
 			} else if content.Type == types.ContentTypeImageURL {
-				// 始终使用最后一个图片URL
+				// 处理图片URL
 				imageUrl = content.ImageURL.URL
 			}
 		}
 		prompt += "\n"
 	}
+
 	prompt += "assistant: \n"
-	
+
+	// 移除 defaultMaxImageResolution 声明
+
 	return &ReplicateRequest[ReplicateChatRequest]{
 		Stream: request.Stream,
 		Input: ReplicateChatRequest{
@@ -100,13 +110,15 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) *ReplicateReques
 	}
 }
 
-func (p ReplicateProvider) convertToChatOpenai(response ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
+func (p *ReplicateProvider) convertToChatOpenai(response *ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
+
 	responseText := ""
 	if response.Output != nil {
 		for _, text := range response.Output {
 			responseText += text
 		}
 	}
+
 	choice := types.ChatCompletionChoice{
 		Index: 0,
 		Message: types.ChatCompletionMessage{
@@ -115,6 +127,7 @@ func (p ReplicateProvider) convertToChatOpenai(response ReplicateResponse[[]stri
 		},
 		FinishReason: types.FinishReasonStop,
 	}
+
 	openaiResponse := &types.ChatCompletionResponse{
 		ID:      response.ID,
 		Object:  "chat.completion",
@@ -127,62 +140,78 @@ func (p ReplicateProvider) convertToChatOpenai(response ReplicateResponse[[]stri
 			TotalTokens:      0,
 		},
 	}
+
 	p.Usage.PromptTokens = response.Metrics.InputTokenCount
 	p.Usage.CompletionTokens = response.Metrics.OutputTokenCount
 	p.Usage.TotalTokens = p.Usage.PromptTokens + p.Usage.CompletionTokens
 	openaiResponse.Usage = p.Usage
+
 	return openaiResponse, nil
 }
 
-func (p ReplicateProvider) CreateChatCompletionStream(request types.ChatCompletionRequest) (requester.StreamReaderInterface[string], *types.OpenAIErrorWithStatusCode) {
+func (p *ReplicateProvider) CreateChatCompletionStream(request *types.ChatCompletionRequest) (requester.StreamReaderInterface[string], *types.OpenAIErrorWithStatusCode) {
 	url, errWithCode := p.GetSupportedAPIUri(config.RelayModeChatCompletions)
 	if errWithCode != nil {
 		return nil, errWithCode
 	}
+
 	// 获取请求地址
 	fullRequestURL := p.GetFullRequestURL(url, request.Model)
 	if fullRequestURL == "" {
 		return nil, common.ErrorWrapper(nil, "invalid_recraft_config", http.StatusInternalServerError)
 	}
+
 	// 获取请求头
 	headers := p.GetRequestHeaders()
+
 	replicateRequest := convertFromChatOpenai(request)
 	req, err := p.Requester.NewRequest(http.MethodPost, fullRequestURL, p.Requester.WithBody(replicateRequest), p.Requester.WithHeader(headers))
+
 	if err != nil {
 		return nil, common.ErrorWrapper(err, "new_request_failed", http.StatusInternalServerError)
 	}
+
 	replicateResponse := &ReplicateResponse[[]string]{}
+
 	// 发送请求
 	_, errWithCode = p.Requester.SendRequest(req, replicateResponse, false)
 	if errWithCode != nil {
 		return nil, errWithCode
 	}
+
 	headers["Accept"] = "text/event-stream"
 	req, err = p.Requester.NewRequest(http.MethodGet, replicateResponse.Urls.Stream, p.Requester.WithHeader(headers))
+
 	if err != nil {
 		return nil, common.ErrorWrapper(err, "new_request_failed", http.StatusInternalServerError)
 	}
+
 	// 发送请求
 	resp, errWithCode := p.Requester.SendRequestRaw(req)
 	if errWithCode != nil {
 		return nil, errWithCode
 	}
+
 	chatHandler := ReplicateStreamHandler{
 		Usage:     p.Usage,
 		ModelName: request.Model,
 		ID:        replicateResponse.ID,
 		Provider:  p,
 	}
+
 	return requester.RequestStream(p.Requester, resp, chatHandler.HandlerChatStream)
 }
 
-func (h ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan string, errChan chan error) {
-	if strings.HasPrefix(string(rawLine), "event: done") {
+func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan chan string, errChan chan error) {
+	if strings.HasPrefix(string(*rawLine), "event: done") {
+
 		// 获取用量
 		replicateResponse := getPredictionResponse[[]string](h.Provider, h.ID)
+
 		h.Usage.PromptTokens = replicateResponse.Metrics.InputTokenCount
 		h.Usage.CompletionTokens = replicateResponse.Metrics.OutputTokenCount
 		h.Usage.TotalTokens = h.Usage.PromptTokens + h.Usage.CompletionTokens
+
 		// 需要有一个stop
 		choice := types.ChatCompletionStreamChoice{
 			Index: 0,
@@ -191,52 +220,32 @@ func (h ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan 
 			},
 			FinishReason: types.FinishReasonStop,
 		}
+
 		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
+
 		errChan <- io.EOF
 		*rawLine = requester.StreamClosed
+
 		return
 	}
-	
+
 	// 如果rawLine 前缀不为data:，则直接返回
-	if !strings.HasPrefix(string(rawLine), "data: ") {
-		// 检查是否为空的data:行，它代表换行符
-		if string(rawLine) == "data:" {
-			choice := types.ChatCompletionStreamChoice{
-				Index: 0,
-				Delta: types.ChatCompletionStreamChoiceDelta{
-					Role:    types.ChatMessageRoleAssistant,
-					Content: "\n",
-				},
-			}
-			dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-		}
+	if !strings.HasPrefix(string(*rawLine), "data: ") {
 		*rawLine = nil
 		return
 	}
-	
+
 	// 去除前缀
-	data := rawLine[6:]
-	
-	// 检查是否为空内容，如果是空内容但不是空字符串，也视为换行符
-	if len(data) == 0 {
-		choice := types.ChatCompletionStreamChoice{
-			Index: 0,
-			Delta: types.ChatCompletionStreamChoiceDelta{
-				Role:    types.ChatMessageRoleAssistant,
-				Content: "\n",
-			},
-		}
-		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-		return
-	}
-	
+	*rawLine = (*rawLine)[6:]
+
 	choice := types.ChatCompletionStreamChoice{
 		Index: 0,
 		Delta: types.ChatCompletionStreamChoiceDelta{
 			Role:    types.ChatMessageRoleAssistant,
-			Content: string(data),
+			Content: string(*rawLine),
 		},
 	}
+
 	dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
 }
 
@@ -248,6 +257,8 @@ func getStreamResponse(id string, choice types.ChatCompletionStreamChoice, model
 		Model:   modelName,
 		Choices: []types.ChatCompletionStreamChoice{choice},
 	}
+
 	responseBody, _ := json.Marshal(chatCompletion)
+
 	return string(responseBody)
 }
