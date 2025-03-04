@@ -19,10 +19,10 @@ type ReplicateStreamHandler struct {
 	Provider  *ReplicateProvider
 }
 
-func (p ReplicateProvider) CreateChatCompletion(request types.ChatCompletionRequest) (response types.ChatCompletionResponse, errWithCode types.OpenAIErrorWithStatusCode) {
-	url, errWithCode := p.GetSupportedAPIUri(config.RelayModeChatCompletions)
-	if errWithCode != nil {
-		return nil, errWithCode
+func (p ReplicateProvider) CreateChatCompletion(request types.ChatCompletionRequest) (types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
+	url, err := p.GetSupportedAPIUri(config.RelayModeChatCompletions)
+	if err != nil {
+		return nil, err
 	}
 	// 获取请求地址
 	fullRequestURL := p.GetFullRequestURL(url, request.Model)
@@ -38,18 +38,18 @@ func (p ReplicateProvider) CreateChatCompletion(request types.ChatCompletionRequ
 	}
 	replicateResponse := &ReplicateResponse[[]string]{}
 	// 发送请求
-	_, errWithCode = p.Requester.SendRequest(req, replicateResponse, false)
-	if errWithCode != nil {
-		return nil, errWithCode
+	_, err = p.Requester.SendRequest(req, replicateResponse, false)
+	if err != nil {
+		return nil, err
 	}
-	replicateResponse, err = getPrediction(p, replicateResponse)
+	replicateResponseResult, err := getPrediction(p, replicateResponse)
 	if err != nil {
 		return nil, common.ErrorWrapper(err, "prediction_failed", http.StatusInternalServerError)
 	}
-	return p.convertToChatOpenai(replicateResponse)
+	return p.convertToChatOpenai(replicateResponseResult)
 }
 
-func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest[ReplicateChatRequest] {
+func convertFromChatOpenai(request types.ChatCompletionRequest) *ReplicateRequest[ReplicateChatRequest] {
 	systemPrompt := ""
 	prompt := ""
 	var imageUrl string
@@ -114,7 +114,7 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest
 	}
 }
 
-func (p ReplicateProvider) convertToChatOpenai(response ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
+func (p ReplicateProvider) convertToChatOpenai(response *ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
 	responseText := ""
 	if response.Output != nil {
 		for _, text := range response.Output {
@@ -149,9 +149,9 @@ func (p ReplicateProvider) convertToChatOpenai(response ReplicateResponse[[]stri
 }
 
 func (p ReplicateProvider) CreateChatCompletionStream(request types.ChatCompletionRequest) (requester.StreamReaderInterface[string], *types.OpenAIErrorWithStatusCode) {
-	url, errWithCode := p.GetSupportedAPIUri(config.RelayModeChatCompletions)
-	if errWithCode != nil {
-		return nil, errWithCode
+	url, err := p.GetSupportedAPIUri(config.RelayModeChatCompletions)
+	if err != nil {
+		return nil, err
 	}
 	// 获取请求地址
 	fullRequestURL := p.GetFullRequestURL(url, request.Model)
@@ -167,9 +167,9 @@ func (p ReplicateProvider) CreateChatCompletionStream(request types.ChatCompleti
 	}
 	replicateResponse := &ReplicateResponse[[]string]{}
 	// 发送请求
-	_, errWithCode = p.Requester.SendRequest(req, replicateResponse, false)
-	if errWithCode != nil {
-		return nil, errWithCode
+	_, err = p.Requester.SendRequest(req, replicateResponse, false)
+	if err != nil {
+		return nil, err
 	}
 	headers["Accept"] = "text/event-stream"
 	req, err = p.Requester.NewRequest(http.MethodGet, replicateResponse.Urls.Stream, p.Requester.WithHeader(headers))
@@ -177,9 +177,9 @@ func (p ReplicateProvider) CreateChatCompletionStream(request types.ChatCompleti
 		return nil, common.ErrorWrapper(err, "new_request_failed", http.StatusInternalServerError)
 	}
 	// 发送请求
-	resp, errWithCode := p.Requester.SendRequestRaw(req)
-	if errWithCode != nil {
-		return nil, errWithCode
+	resp, err := p.Requester.SendRequestRaw(req)
+	if err != nil {
+		return nil, err
 	}
 	chatHandler := ReplicateStreamHandler{
 		Usage:     p.Usage,
