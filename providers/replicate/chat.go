@@ -52,7 +52,7 @@ func (p ReplicateProvider) CreateChatCompletion(request types.ChatCompletionRequ
 func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest[ReplicateChatRequest] {
 	systemPrompt := ""
 	prompt := ""
-	var imageUrls []string // 改为累积所有图片 URL
+	var imageUrl string // 仍然保留，但我们会优先使用最后一条含图片的消息
 
 	// 设置最小 MaxTokens 为 1024
 	if request.MaxTokens == 0 && request.MaxCompletionTokens > 0 {
@@ -62,19 +62,23 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest
 	if request.MaxTokens < 1024 {
 		request.MaxTokens = 1024
 	}
+
 	for _, msg := range request.Messages {
 		if msg.Role == "system" {
 			systemPrompt += msg.StringContent() + "\n"
 			continue
 		}
+		
 		prompt += msg.Role + ": \n"
 		openaiContent := msg.ParseContent()
+		
 		for _, content := range openaiContent {
 			if content.Type == types.ContentTypeText {
 				prompt += content.Text
 			} else if content.Type == types.ContentTypeImageURL {
-				// 累积所有图片 URL
-				imageUrls = append(imageUrls, content.ImageURL.URL)
+				// 处理图片URL - 保存最后一个图片URL
+				// 这样即使多轮对话中有多张图片，我们也会使用最新的一张
+				imageUrl = content.ImageURL.URL
 			}
 		}
 		prompt += "\n"
@@ -92,7 +96,7 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest
 			Prompt:           prompt,
 			PresencePenalty:  request.PresencePenalty,
 			FrequencyPenalty: request.FrequencyPenalty,
-			Image:            strings.Join(imageUrls, "\n"), // 使用换行符拼接多个图片 URL
+			Image:            imageUrl,
 		},
 	}
 }
@@ -174,14 +178,14 @@ func (p ReplicateProvider) CreateChatCompletionStream(request types.ChatCompleti
 }
 
 func (h ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan string, errChan chan error) {
-	line := string(rawLine)
-	if strings.HasPrefix(line, "event: done") {
+	if strings.HasPrefix(string(rawLine), "event: done") {
 		// 获取用量
 		replicateResponse := getPredictionResponse[[]string](h.Provider, h.ID)
 		h.Usage.PromptTokens = replicateResponse.Metrics.InputTokenCount
 		h.Usage.CompletionTokens = replicateResponse.Metrics.OutputTokenCount
 		h.Usage.TotalTokens = h.Usage.PromptTokens + h.Usage.CompletionTokens
-		// 发送 stop 标记
+		
+		// 需要有一个stop
 		choice := types.ChatCompletionStreamChoice{
 			Index: 0,
 			Delta: types.ChatCompletionStreamChoiceDelta{
@@ -191,26 +195,41 @@ func (h ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan 
 		}
 		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
 		errChan <- io.EOF
+		rawLine = requester.StreamClosed
 		return
 	}
-	// 如果不是以 "data: " 开头，直接跳过
-	if !strings.HasPrefix(line, "data: ") {
+	
+	// 如果rawLine 前缀不为data:，则直接返回
+	if !strings.HasPrefix(string(rawLine), "data: ") {
+		rawLine = nil
 		return
 	}
-	// 去除前缀 "data: "
-	content := line[6:]
-	// 如果内容为空，则认为是换行符
+	
+	// 去除前缀
+	content := string(rawLine)[6:]
+	
+	// 检查是否为空行
 	if content == "" {
-		content = "\n"
+		// 如果是空行，则发送换行符
+		choice := types.ChatCompletionStreamChoice{
+			Index: 0,
+			Delta: types.ChatCompletionStreamChoiceDelta{
+				Role:    types.ChatMessageRoleAssistant,
+				Content: "\n\n", // 发送两个换行符，模拟原始返回的格式
+			},
+		}
+		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
+	} else {
+		// 非空内容正常处理
+		choice := types.ChatCompletionStreamChoice{
+			Index: 0,
+			Delta: types.ChatCompletionStreamChoiceDelta{
+				Role:    types.ChatMessageRoleAssistant,
+				Content: content,
+			},
+		}
+		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
 	}
-	choice := types.ChatCompletionStreamChoice{
-		Index: 0,
-		Delta: types.ChatCompletionStreamChoiceDelta{
-			Role:    types.ChatMessageRoleAssistant,
-			Content: content,
-		},
-	}
-	dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
 }
 
 func getStreamResponse(id string, choice types.ChatCompletionStreamChoice, modelName string) string {
