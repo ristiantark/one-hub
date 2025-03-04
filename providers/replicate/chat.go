@@ -17,6 +17,8 @@ type ReplicateStreamHandler struct {
 	ModelName string
 	ID        string
 	Provider  *ReplicateProvider
+	// 用于累积输出内容
+	AccumulatedOutput string
 }
 
 func (p *ReplicateProvider) CreateChatCompletion(request *types.ChatCompletionRequest) (response *types.ChatCompletionResponse, errWithCode *types.OpenAIErrorWithStatusCode) {
@@ -71,6 +73,25 @@ func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateReque
 		request.MaxTokens = 1024
 	}
 
+	// 遍历所有消息，查找最后一条包含图片的消息
+	for i := len(request.Messages) - 1; i >= 0; i-- {
+		msg := request.Messages[i]
+		if msg.Role == "user" {
+			openaiContent := msg.ParseContent()
+			for _, content := range openaiContent {
+				if content.Type == types.ContentTypeImageURL && imageUrl == "" {
+					// 找到最后一条包含图片的消息
+					imageUrl = content.ImageURL.URL
+					break
+				}
+			}
+			if imageUrl != "" {
+				break
+			}
+		}
+	}
+
+	// 处理所有消息内容
 	for _, msg := range request.Messages {
 		if msg.Role == "system" {
 			systemPrompt += msg.StringContent() + "\n"
@@ -82,17 +103,13 @@ func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateReque
 		for _, content := range openaiContent {
 			if content.Type == types.ContentTypeText {
 				prompt += content.Text
-			} else if content.Type == types.ContentTypeImageURL {
-				// 处理图片URL
-				imageUrl = content.ImageURL.URL
 			}
+			// 不需要在这里处理图片URL，因为我们已经在上面处理了
 		}
 		prompt += "\n"
 	}
 
 	prompt += "assistant: \n"
-
-	// 移除 defaultMaxImageResolution 声明
 
 	return &ReplicateRequest[ReplicateChatRequest]{
 		Stream: request.Stream,
@@ -193,10 +210,11 @@ func (p *ReplicateProvider) CreateChatCompletionStream(request *types.ChatComple
 	}
 
 	chatHandler := ReplicateStreamHandler{
-		Usage:     p.Usage,
-		ModelName: request.Model,
-		ID:        replicateResponse.ID,
-		Provider:  p,
+		Usage:             p.Usage,
+		ModelName:         request.Model,
+		ID:                replicateResponse.ID,
+		Provider:          p,
+		AccumulatedOutput: "", // 初始化累积输出
 	}
 
 	return requester.RequestStream(p.Requester, resp, chatHandler.HandlerChatStream)
@@ -204,7 +222,6 @@ func (p *ReplicateProvider) CreateChatCompletionStream(request *types.ChatComple
 
 func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan chan string, errChan chan error) {
 	if strings.HasPrefix(string(*rawLine), "event: done") {
-
 		// 获取用量
 		replicateResponse := getPredictionResponse[[]string](h.Provider, h.ID)
 
@@ -214,10 +231,8 @@ func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan cha
 
 		// 需要有一个stop
 		choice := types.ChatCompletionStreamChoice{
-			Index: 0,
-			Delta: types.ChatCompletionStreamChoiceDelta{
-				Role: types.ChatMessageRoleAssistant,
-			},
+			Index:        0,
+			Delta:        types.ChatCompletionStreamChoiceDelta{},
 			FinishReason: types.FinishReasonStop,
 		}
 
@@ -237,12 +252,23 @@ func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan cha
 
 	// 去除前缀
 	*rawLine = (*rawLine)[6:]
+	content := string(*rawLine)
+
+	// 检查输出中是否有特殊序列表示换行
+	// 正确处理输出中的换行符
+	if h.AccumulatedOutput == "\n" && strings.HasPrefix(content, "\n") {
+		// 如果前一个输出是换行符，且当前输出也以换行符开始，这意味着是一个新段落
+		content = "\n" + strings.TrimPrefix(content, "\n")
+	}
+
+	// 保存当前输出用于处理下一个片段
+	h.AccumulatedOutput = content
 
 	choice := types.ChatCompletionStreamChoice{
 		Index: 0,
 		Delta: types.ChatCompletionStreamChoiceDelta{
 			Role:    types.ChatMessageRoleAssistant,
-			Content: string(*rawLine),
+			Content: content,
 		},
 	}
 
