@@ -186,58 +186,61 @@ func (p *ReplicateProvider) CreateChatCompletionStream(request *types.ChatComple
 }
 
 func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan chan string, errChan chan error) {
-	if strings.HasPrefix(string(*rawLine), "event: done") {
-		// 获取用量
-		replicateResponse := getPredictionResponse[[]string](h.Provider, h.ID)
-		h.Usage.PromptTokens = replicateResponse.Metrics.InputTokenCount
-		h.Usage.CompletionTokens = replicateResponse.Metrics.OutputTokenCount
-		h.Usage.TotalTokens = h.Usage.PromptTokens + h.Usage.CompletionTokens
-		// 需要有一个stop
-		choice := types.ChatCompletionStreamChoice{
-			Index: 0,
-			Delta: types.ChatCompletionStreamChoiceDelta{
-				Role: types.ChatMessageRoleAssistant,
-			},
-			FinishReason: types.FinishReasonStop,
-		}
-		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-		errChan <- io.EOF
-		*rawLine = requester.StreamClosed
-		return
-	}
-	
-	// 如果rawLine 前缀不为data:，则直接返回
-	if !strings.HasPrefix(string(*rawLine), "data: ") {
-		*rawLine = nil
-		return
-	}
-	
-	// 去除前缀
-	*rawLine = (*rawLine)[6:]
-	
-	// 检查是否为空行 - 这是关键点
-	content := string(*rawLine)
-	if content == "" {
-		// 如果是空行，发送换行符
-		choice := types.ChatCompletionStreamChoice{
-			Index: 0,
-			Delta: types.ChatCompletionStreamChoiceDelta{
-				Role:    types.ChatMessageRoleAssistant,
-				Content: "\n\n", // 发送两个换行符，模拟原始响应中的换行效果
-			},
-		}
-		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-		return
-	}
-	
-	choice := types.ChatCompletionStreamChoice{
-		Index: 0,
-		Delta: types.ChatCompletionStreamChoiceDelta{
-			Role:    types.ChatMessageRoleAssistant,
-			Content: content,
-		},
-	}
-	dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
+    // 处理结束事件
+    if strings.HasPrefix(string(*rawLine), "event: done") {
+        // 获取用量
+        replicateResponse := getPredictionResponse[[]string](h.Provider, h.ID)
+        if replicateResponse != nil {
+            h.Usage.PromptTokens = replicateResponse.Metrics.InputTokenCount
+            h.Usage.CompletionTokens = replicateResponse.Metrics.OutputTokenCount
+            h.Usage.TotalTokens = h.Usage.PromptTokens + h.Usage.CompletionTokens
+        }
+        // 发送结束信号
+        choice := types.ChatCompletionStreamChoice{
+            Index: 0,
+            Delta: types.ChatCompletionStreamChoiceDelta{
+                Role: types.ChatMessageRoleAssistant,
+            },
+            FinishReason: types.FinishReasonStop,
+        }
+        dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
+        errChan <- io.EOF
+        *rawLine = requester.StreamClosed
+        return
+    }
+    
+    // 如果不是以 "data: " 开头，忽略此行
+    if !strings.HasPrefix(string(*rawLine), "data: ") {
+        *rawLine = nil
+        return
+    }
+    
+    // 去除前缀 "data: "
+    content := string((*rawLine)[6:])
+    
+    // 检查是否为空行（空数据表示换行）
+    if content == "" || strings.TrimSpace(content) == "" {
+        // 发送换行符
+        choice := types.ChatCompletionStreamChoice{
+            Index: 0,
+            Delta: types.ChatCompletionStreamChoiceDelta{
+                Role:    types.ChatMessageRoleAssistant,
+                Content: "\n",
+            },
+        }
+        dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
+        return
+    }
+    
+    // 正常内容处理
+    choice := types.ChatCompletionStreamChoice{
+        Index: 0,
+        Delta: types.ChatCompletionStreamChoiceDelta{
+            Role:    types.ChatMessageRoleAssistant,
+            Content: content,
+        },
+    }
+    dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
 }
 
 func getStreamResponse(id string, choice types.ChatCompletionStreamChoice, modelName string) string {
