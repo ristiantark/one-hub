@@ -42,7 +42,7 @@ func (p *ReplicateProvider) CreateChatCompletion(request types.ChatCompletionReq
 	if errWithCode != nil {
 		return types.ChatCompletionResponse{}, errWithCode
 	}
-	replicateResponseResult, err := getPrediction(*p, replicateResponse)
+	replicateResponseResult, err := getPrediction(p, replicateResponse)
 	if err != nil {
 		return types.ChatCompletionResponse{}, common.ErrorWrapper(err, "prediction_failed", http.StatusInternalServerError)
 	}
@@ -191,62 +191,60 @@ func (p *ReplicateProvider) CreateChatCompletionStream(request types.ChatComplet
 		ID:        replicateResponse.ID,
 		Provider:  p,
 	}
-	return requester.RequestStream(p.Requester, resp, chatHandler.HandlerChatStream)
-}
-
-func (h ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan string, errChan chan error) {
-	// 检查是否是完成事件
-	if strings.HasPrefix(string(rawLine), "event: done") {
-		// 获取用量
-		replicateResponse := getPredictionResponse[[]string](h.Provider, h.ID)
-		h.Usage.PromptTokens = replicateResponse.Metrics.InputTokenCount
-		h.Usage.CompletionTokens = replicateResponse.Metrics.OutputTokenCount
-		h.Usage.TotalTokens = h.Usage.PromptTokens + h.Usage.CompletionTokens
-		// 需要有一个stop
-		choice := types.ChatCompletionStreamChoice{
-			Index: 0,
-			Delta: types.ChatCompletionStreamChoiceDelta{
-				Role: types.ChatMessageRoleAssistant,
-			},
-			FinishReason: types.FinishReasonStop,
-		}
-		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-		errChan <- io.EOF
-		*rawLine = requester.StreamClosed
-		return
-	}
 	
-	// 如果rawLine 前缀不为data:，则直接返回
-	if !strings.HasPrefix(string(rawLine), "data: ") {
-		*rawLine = nil
-		return
-	}
-	
-	// 去除前缀 "data: "
-	data := string(rawLine)[6:]
-	
-	// 如果数据为空（只有data:），表示是一个换行
-	if len(strings.TrimSpace(data)) == 0 {
-		// 发送换行符
-		choice := types.ChatCompletionStreamChoice{
-			Index: 0,
-			Delta: types.ChatCompletionStreamChoiceDelta{
-				Role:    types.ChatMessageRoleAssistant,
-				Content: "\n\n", // 用两个换行符表示段落分隔
-			},
+	// 使用显式类型参数
+	return requester.RequestStream[string](p.Requester, resp, func(rawLine []byte, dataChan chan string, errChan chan error) {
+		// 检查是否是完成事件
+		if strings.HasPrefix(string(rawLine), "event: done") {
+			// 获取用量
+			replicateResponse := getPredictionResponse[[]string](chatHandler.Provider, chatHandler.ID)
+			chatHandler.Usage.PromptTokens = replicateResponse.Metrics.InputTokenCount
+			chatHandler.Usage.CompletionTokens = replicateResponse.Metrics.OutputTokenCount
+			chatHandler.Usage.TotalTokens = chatHandler.Usage.PromptTokens + chatHandler.Usage.CompletionTokens
+			// 需要有一个stop
+			choice := types.ChatCompletionStreamChoice{
+				Index: 0,
+				Delta: types.ChatCompletionStreamChoiceDelta{
+					Role: types.ChatMessageRoleAssistant,
+				},
+				FinishReason: types.FinishReasonStop,
+			}
+			dataChan <- getStreamResponse(chatHandler.ID, choice, chatHandler.ModelName)
+			errChan <- io.EOF
+			return
 		}
-		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-	} else {
-		// 发送常规文本内容
-		choice := types.ChatCompletionStreamChoice{
-			Index: 0,
-			Delta: types.ChatCompletionStreamChoiceDelta{
-				Role:    types.ChatMessageRoleAssistant,
-				Content: data,
-			},
+		
+		// 如果rawLine 前缀不为data:，则直接返回
+		if !strings.HasPrefix(string(rawLine), "data: ") {
+			return
 		}
-		dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-	}
+		
+		// 去除前缀 "data: "
+		data := string(rawLine)[6:]
+		
+		// 如果数据为空（只有data:），表示是一个换行
+		if len(strings.TrimSpace(data)) == 0 {
+			// 发送换行符
+			choice := types.ChatCompletionStreamChoice{
+				Index: 0,
+				Delta: types.ChatCompletionStreamChoiceDelta{
+					Role:    types.ChatMessageRoleAssistant,
+					Content: "\n\n", // 用两个换行符表示段落分隔
+				},
+			}
+			dataChan <- getStreamResponse(chatHandler.ID, choice, chatHandler.ModelName)
+		} else {
+			// 发送常规文本内容
+			choice := types.ChatCompletionStreamChoice{
+				Index: 0,
+				Delta: types.ChatCompletionStreamChoiceDelta{
+					Role:    types.ChatMessageRoleAssistant,
+					Content: data,
+				},
+			}
+			dataChan <- getStreamResponse(chatHandler.ID, choice, chatHandler.ModelName)
+		}
+	})
 }
 
 func getStreamResponse(id string, choice types.ChatCompletionStreamChoice, modelName string) string {
