@@ -76,7 +76,7 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) *ReplicateReques
 			if content.Type == types.ContentTypeText {
 				prompt += content.Text
 			} else if content.Type == types.ContentTypeImageURL {
-				// 处理图片URL - 取最后一个图片URL作为图片输入
+				// 始终使用最后一个图片URL
 				imageUrl = content.ImageURL.URL
 			}
 		}
@@ -100,7 +100,7 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) *ReplicateReques
 	}
 }
 
-func (p ReplicateProvider) convertToChatOpenai(response *ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
+func (p ReplicateProvider) convertToChatOpenai(response ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
 	responseText := ""
 	if response.Output != nil {
 		for _, text := range response.Output {
@@ -199,7 +199,7 @@ func (h ReplicateStreamHandler) HandlerChatStream(rawLine []byte, dataChan chan 
 	
 	// 如果rawLine 前缀不为data:，则直接返回
 	if !strings.HasPrefix(string(rawLine), "data: ") {
-		// 对于空的data:行，它们代表换行符
+		// 检查是否为空的data:行，它代表换行符
 		if string(rawLine) == "data:" {
 			choice := types.ChatCompletionStreamChoice{
 				Index: 0,
