@@ -10,18 +10,13 @@ import (
 	"one-api/common/utils"
 	"one-api/types"
 	"strings"
-	"bytes"
 )
 
 type ReplicateStreamHandler struct {
-	Usage       *types.Usage
-	ModelName   string
-	ID          string
-	Provider    *ReplicateProvider
-	Buffer      []string       // 用于缓存连续的空行
-	EventBuffer bytes.Buffer   // 用于缓存整个事件
-	IsEvent     bool           // 标记当前是否在处理事件
-	CurrentEvent string        // 当前事件类型
+	Usage     *types.Usage
+	ModelName string
+	ID        string
+	Provider  *ReplicateProvider
 }
 
 func (p *ReplicateProvider) CreateChatCompletion(request *types.ChatCompletionRequest) (response *types.ChatCompletionResponse, errWithCode *types.OpenAIErrorWithStatusCode) {
@@ -65,7 +60,7 @@ func (p *ReplicateProvider) CreateChatCompletion(request *types.ChatCompletionRe
 func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateRequest[ReplicateChatRequest] {
 	systemPrompt := ""
 	prompt := ""
-	var imageUrl string
+	var imageUrls []string
 
 	// 设置最小 MaxTokens 为 1024
 	if request.MaxTokens == 0 && request.MaxCompletionTokens > 0 {
@@ -85,17 +80,23 @@ func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateReque
 		prompt += msg.Role + ": \n"
 		openaiContent := msg.ParseContent()
 		for _, content := range openaiContent {
-			if content.Type == types.ContentTypeText {
+			switch content.Type {
+			case types.ContentTypeText:
 				prompt += content.Text
-			} else if content.Type == types.ContentTypeImageURL {
-				// 处理图片URL - 使用最后一个图片
-				imageUrl = content.ImageURL.URL
+			case types.ContentTypeImageURL:
+				imageUrls = append(imageUrls, content.ImageURL.URL)
 			}
 		}
 		prompt += "\n"
 	}
 
 	prompt += "assistant: \n"
+
+	// 合并多个图片 URL，使用逗号分隔
+	imageStr := ""
+	if len(imageUrls) > 0 {
+		imageStr = strings.Join(imageUrls, ",")
+	}
 
 	return &ReplicateRequest[ReplicateChatRequest]{
 		Stream: request.Stream,
@@ -108,12 +109,13 @@ func convertFromChatOpenai(request *types.ChatCompletionRequest) *ReplicateReque
 			Prompt:           prompt,
 			PresencePenalty:  request.PresencePenalty,
 			FrequencyPenalty: request.FrequencyPenalty,
-			Image:            imageUrl,
+			Image:            imageStr,
 		},
 	}
 }
 
 func (p *ReplicateProvider) convertToChatOpenai(response *ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
+
 	responseText := ""
 	if response.Output != nil {
 		for _, text := range response.Output {
@@ -199,17 +201,14 @@ func (p *ReplicateProvider) CreateChatCompletionStream(request *types.ChatComple
 		ModelName: request.Model,
 		ID:        replicateResponse.ID,
 		Provider:  p,
-		Buffer:    make([]string, 0),
 	}
 
 	return requester.RequestStream(p.Requester, resp, chatHandler.HandlerChatStream)
 }
 
 func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan chan string, errChan chan error) {
-	line := string(*rawLine)
+	if strings.HasPrefix(string(*rawLine), "event: done") {
 
-	// 处理结束事件
-	if strings.HasPrefix(line, "event: done") {
 		// 获取用量
 		replicateResponse := getPredictionResponse[[]string](h.Provider, h.ID)
 
@@ -217,24 +216,7 @@ func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan cha
 		h.Usage.CompletionTokens = replicateResponse.Metrics.OutputTokenCount
 		h.Usage.TotalTokens = h.Usage.PromptTokens + h.Usage.CompletionTokens
 
-		// 如果缓冲区中还有数据，先发送
-		if len(h.Buffer) > 0 {
-			newlineCount := len(h.Buffer) - 1 // 空行数量转换为换行符数量
-			if newlineCount > 0 {
-				content := strings.Repeat("\n", newlineCount)
-				choice := types.ChatCompletionStreamChoice{
-					Index: 0,
-					Delta: types.ChatCompletionStreamChoiceDelta{
-						Role:    types.ChatMessageRoleAssistant,
-						Content: content,
-					},
-				}
-				dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-			}
-			h.Buffer = nil
-		}
-
-		// 发送结束信号
+		// 需要有一个stop
 		choice := types.ChatCompletionStreamChoice{
 			Index: 0,
 			Delta: types.ChatCompletionStreamChoiceDelta{
@@ -251,72 +233,30 @@ func (h *ReplicateStreamHandler) HandlerChatStream(rawLine *[]byte, dataChan cha
 		return
 	}
 
-	// 检测事件开始
-	if strings.HasPrefix(line, "event: ") {
-		h.IsEvent = true
-		h.CurrentEvent = strings.TrimPrefix(line, "event: ")
-		h.EventBuffer.Reset()
+	// 如果rawLine 前缀不为data:，则直接返回
+	if !strings.HasPrefix(string(*rawLine), "data: ") {
 		*rawLine = nil
 		return
 	}
 
-	// 如果不是数据行且不是我们关心的事件，跳过
-	if !strings.HasPrefix(line, "data: ") && !h.IsEvent {
-		*rawLine = nil
-		return
+	// 去除前缀并处理内容
+	*rawLine = (*rawLine)[6:]
+	content := strings.TrimSpace(string(*rawLine))
+	
+	// 处理空内容换行问题
+	if content == "" {
+		content = "\n"
 	}
 
-	// 如果是数据行
-	if strings.HasPrefix(line, "data: ") {
-		// 只处理output事件的数据
-		if h.CurrentEvent == "output" {
-			content := strings.TrimPrefix(line, "data: ")
-			
-			// 处理空行
-			if len(strings.TrimSpace(content)) == 0 {
-				// 累积空行
-				h.Buffer = append(h.Buffer, "")
-				*rawLine = nil
-				return
-			} else {
-				// 有实际内容，先处理之前积累的空行
-				if len(h.Buffer) > 0 {
-					newlineCount := len(h.Buffer) - 1 // 空行数量转换为换行符数量
-					if newlineCount > 0 {
-						newlineContent := strings.Repeat("\n", newlineCount)
-						choice := types.ChatCompletionStreamChoice{
-							Index: 0,
-							Delta: types.ChatCompletionStreamChoiceDelta{
-								Role:    types.ChatMessageRoleAssistant,
-								Content: newlineContent,
-							},
-						}
-						dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-					}
-					h.Buffer = nil
-				}
-				
-				// 发送实际内容
-				choice := types.ChatCompletionStreamChoice{
-					Index: 0,
-					Delta: types.ChatCompletionStreamChoiceDelta{
-						Role:    types.ChatMessageRoleAssistant,
-						Content: content,
-					},
-				}
-				
-				dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
-			}
-		}
+	choice := types.ChatCompletionStreamChoice{
+		Index: 0,
+		Delta: types.ChatCompletionStreamChoiceDelta{
+			Role:    types.ChatMessageRoleAssistant,
+			Content: content,
+		},
 	}
-	
-	// 事件结束
-	if len(strings.TrimSpace(line)) == 0 && h.IsEvent {
-		h.IsEvent = false
-		h.CurrentEvent = ""
-	}
-	
-	*rawLine = nil
+
+	dataChan <- getStreamResponse(h.ID, choice, h.ModelName)
 }
 
 func getStreamResponse(id string, choice types.ChatCompletionStreamChoice, modelName string) string {
