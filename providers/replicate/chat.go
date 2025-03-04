@@ -49,7 +49,7 @@ func (p ReplicateProvider) CreateChatCompletion(request types.ChatCompletionRequ
 	return p.convertToChatOpenai(replicateResponse)
 }
 
-func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest[ReplicateChatRequest] {
+func convertFromChatOpenai(request types.ChatCompletionRequest) *ReplicateRequest[ReplicateChatRequest] {
 	systemPrompt := ""
 	prompt := ""
 	var imageUrl string
@@ -77,7 +77,6 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest
 				prompt += content.Text
 			} else if content.Type == types.ContentTypeImageURL {
 				// 处理图片URL - 取最后一个图片URL作为图片输入
-				// Replicate API 通常只支持一张图片
 				imageUrl = content.ImageURL.URL
 			}
 		}
@@ -101,7 +100,7 @@ func convertFromChatOpenai(request types.ChatCompletionRequest) ReplicateRequest
 	}
 }
 
-func (p ReplicateProvider) convertToChatOpenai(response ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
+func (p ReplicateProvider) convertToChatOpenai(response *ReplicateResponse[[]string]) (*types.ChatCompletionResponse, *types.OpenAIErrorWithStatusCode) {
 	responseText := ""
 	if response.Output != nil {
 		for _, text := range response.Output {
